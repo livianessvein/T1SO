@@ -14,7 +14,7 @@
 #define C_RST "\x1b[0m"
 #define C_IRQ "\x1b[36m"
 #define C_SCH "\x1b[33m"
-#define C_IO "\x1b[35m"
+#define C_IO  "\x1b[35m"
 #define C_APP "\x1b[32m"
 #define C_ERR "\x1b[31m"
 
@@ -24,7 +24,7 @@ static int nprocs = 0;
 
 /* pipes */
 static int fd_app_r = -1, fd_app_w = -1; // app->kernel (kernel lê r; apps escrevem w)
-static int fd_ic_r = -1, fd_ic_w = -1;   // kernel->IC   (IC lê r; kernel escreve w)
+static int fd_ic_r  = -1, fd_ic_w  = -1; // kernel->IC   (IC lê r; kernel escreve w)
 static pid_t ic_pid = -1;
 
 /* flags de sinal */
@@ -154,8 +154,13 @@ static void dispatch_next()
     pcb_t *p = bypid(nx);
     if (p)
         p->st = ST_RUNNING;
+
     log_ts_prefix();
-    printf(C_SCH "DISPATCH  -> %-3s (pid=%d)" C_RST "\n", name_of(nx), (int)nx);
+    printf(C_SCH "DISPATCH  -> %-3s (pid=%d) [restore PC=%d, RW=%s]" C_RST "\n",
+           name_of(nx), (int)nx,
+           p ? p->last_pc : -1,
+           (p && p->last_syscall != -1) ? (p->last_syscall ? "W" : "R") : "-");
+
     kill(nx, SIGCONT);
 }
 static void preempt_current()
@@ -209,7 +214,7 @@ static void handle_app_pipe()
         }
         if (r == 0)
             break;
-        if (r != sizeof(m))
+        if (r != (ssize_t)sizeof(m))
             continue;
 
         pcb_t *p = bypid(m.pid);
@@ -218,6 +223,9 @@ static void handle_app_pipe()
 
         if (m.msg_type == MSG_SYSCALL_RW)
         {
+            /* salva no contexto o parâmetro da syscall (R/W) */
+            p->last_syscall = (m.arg ? 1 : 0);
+
             log_ts_prefix();
             printf(C_IO "SYSCALL   !! %-3s pede I/O (%s)" C_RST "\n",
                    name_of(m.pid), m.arg ? "WRITE" : "READ");
@@ -229,7 +237,8 @@ static void handle_app_pipe()
                 if (current == p->pid)
                     current = -1;
                 log_ts_prefix();
-                printf(C_IO "BLOCK     .. %-3s bloqueado por I/O" C_RST "\n", name_of(p->pid));
+                printf(C_IO "BLOCK     .. %-3s bloqueado por I/O [ctx: PC=%d, RW=%s]" C_RST "\n",
+                       name_of(p->pid), p->last_pc, p->last_syscall ? "W" : "R");
             }
             else
             {
@@ -240,7 +249,7 @@ static void handle_app_pipe()
         }
         else if (m.msg_type == MSG_APP_STATUS)
         {
-            p->last_pc = m.arg;
+            p->last_pc = m.arg;   // mantém PC atualizado no contexto
             log_ts_prefix();
             printf(C_APP "PC        :: %-3s -> %d" C_RST "\n", p->name, p->last_pc);
         }
@@ -312,7 +321,6 @@ static void schedule_loop()
                 // Só há o processo atual pronto: não faz preempção; mantém rodando
                 log_ts_prefix();
                 printf(C_IRQ "IRQ0      ** time-slice encerrado — único pronto continua" C_RST "\n");
-                // nada de preempt_current(); deixa o current seguir
             }
             else
             {
@@ -336,7 +344,7 @@ static void schedule_loop()
         if (all_done())
         {
             log_ts_prefix();
-            printf(C_SCH "ALL DONE  ✅ todos os apps finalizaram; encerrando Kernel e IC" C_RST "\n");
+            printf(C_SCH "TERMINOU - Todos os apps finalizaram; encerrando Kernel e IC" C_RST "\n");
             if (ic_pid > 0)
                 kill(ic_pid, SIGTERM); // avisa IC para sair
             if (ic_pid > 0)
@@ -365,11 +373,13 @@ int main(int argc, char **argv)
 
     if (argc < 2)
         usage(argv[0]);
+
     nprocs = atoi(argv[1]);
-    if (nprocs < 3)
-        nprocs = 3;
-    if (nprocs > 6)
-        nprocs = 6;
+    if (nprocs < 3 || nprocs > 6) {
+        fprintf(stderr,
+            C_ERR "Erro: número de apps precisa estar entre 3 e 6 (conforme enunciado)." C_RST "\n");
+        usage(argv[0]); // encerra com mensagem clara
+    }
 
     /* pipes app->kernel */
     int p_app[2];
@@ -444,6 +454,7 @@ int main(int argc, char **argv)
             procs[i].pid = pid;
             procs[i].st = ST_READY;
             procs[i].last_pc = 0;
+            procs[i].last_syscall = -1;   /* <<< novo: parâmetro de syscall salvo */
             rq_push(pid);
 
             log_ts_prefix();
