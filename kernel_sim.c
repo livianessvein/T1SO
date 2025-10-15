@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +9,7 @@
 #include <sys/wait.h>
 #include <time.h>
 
-/* ====== Visual ====== */
+/* ====== códigos ANSI ====== */
 #define C_RST "\x1b[0m"
 #define C_IRQ "\x1b[36m"
 #define C_SCH "\x1b[33m"
