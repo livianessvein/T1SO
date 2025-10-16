@@ -383,7 +383,7 @@ static void schedule_loop()
 
         if (all_done()) {
             log_ts_prefix();
-            printf(C_SCH "ALL DONE  ✅ todos os apps finalizaram; encerrando Kernel e IC" C_RST "\n");
+            printf(C_SCH "TERMINOU: todos os apps finalizaram; encerrando Kernel e IC" C_RST "\n");
             if (ic_pid > 0) kill(ic_pid, SIGTERM);
             if (ic_pid > 0) waitpid(ic_pid, NULL, 0);
             break;
