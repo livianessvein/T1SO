@@ -58,6 +58,7 @@ static void rq_push(pid_t p);
 static int  rq_pop(pid_t *p);
 static void io_push(pid_t p);
 static int  io_pop(pid_t *p);
+static void handle_app_pipe(void);
 
 /* ====== Helpers ====== */
 static void log_ts_prefix(void)
@@ -178,6 +179,11 @@ static void dispatch_next()
                (p->last_syscall != -1) ? (p->last_syscall ? "W" : "R") : "-");
 
         kill(nx, SIGCONT);
+        // Dá um tempo pro app postar STATUS e já drenamos o pipe
+        for (int spin = 0; spin < 5; ++spin) {   // 5 iterações ~15 ms
+            usleep(3000);                        // 3 ms por volta
+            handle_app_pipe();                   // leitura não bloqueante
+        }
         return;
     }
 

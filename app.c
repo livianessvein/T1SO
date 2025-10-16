@@ -26,12 +26,17 @@ static void send_status(int pc){
 }
 
 int main(int argc, char** argv){
+    // Barreira inicial: o app nasce parado e só prossegue quando o kernel der SIGCONT
+    // Isso evita STATUS "adiantado" antes do primeiro DISPATCH
+    raise(SIGSTOP);
+
     if(argc<5){
         fprintf(stderr,"Uso: %s <fd_kernel_write> <nome> <idx> <kernel_pid>\n", argv[0]);
         return 1;
     }
     fd_kernel = atoi(argv[1]);
     strncpy(me_name, argv[2], sizeof(me_name)-1);
+    me_name[sizeof(me_name)-1] = '\0';
     idx = atoi(argv[3]);
     kernel_pid = (pid_t)atoi(argv[4]);
 
@@ -44,16 +49,18 @@ int main(int argc, char** argv){
 
     const int MAX = 15;
 
-    for(int pc=1; pc<=MAX; ++pc){
-        send_status(pc);
-        sleep(1);
+    for (int pc = 1; pc <= MAX; ++pc) {
+        send_status(pc);                // 1) reporta imediatamente
 
-        for(int k=0;k<io_n;k++){
-            if(pc == io_points[k]){
-                do_syscall_rw((pc%2)==0 ? 1 : 0); // 0=READ,1=WRITE
+        // 2) se este PC tem I/O, pede e se bloqueia; quando voltar, segue
+        for (int k = 0; k < io_n; ++k) {
+            if (pc == io_points[k]) {
+                do_syscall_rw((pc % 2) ? 0 : 1); // ímpar=READ, par=WRITE
                 break;
             }
         }
+
+        sleep(1);                       // 3) consome 1s de CPU
     }
     return 0;
 }
