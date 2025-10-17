@@ -1,3 +1,14 @@
+// =============================================================
+// kernel_sim.c — Núcleo da simulação de SO (escalação + I/O)
+// =============================================================
+// Este módulo implementa um kernel simplificado que:
+//  - mantém PCBs e filas de PRONTOS e de I/O;
+//  - faz escalonamento Round-Robin com quantum de 1s (via IRQ0);
+//  - serializa pedidos de I/O (1 dispositivo D1) e libera após 3s (IRQ1);
+//  - controla processos via SIGSTOP/SIGCONT;
+//  - recebe mensagens dos apps por pipe e registra o último PC (last_pc).
+// O InterController (IC) simula o hardware: IRQ0 (timer) e IRQ1 (fim de I/O).
+// A comunicação usa pipes não-bloqueantes e sinais POSIX.
 #include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +20,7 @@
 #include <sys/wait.h>
 #include <time.h>
 
+/* Códigos ANSI apenas para colorir os logs e facilitar leitura. */
 /* ====== códigos ANSI ====== */
 #define C_RST "\x1b[0m"
 #define C_IRQ "\x1b[36m"
@@ -17,26 +29,33 @@
 #define C_APP "\x1b[32m"
 #define C_ERR "\x1b[31m"
 
+// Tabela de processos (PCB) e contagem de processos spawnados
 /* ====== Estado global ====== */
 static pcb_t procs[MAX_APPS];
 static int nprocs = 0;
 
-/* pipes */
+// Pipes de IPC
+//  - app->kernel: apps escrevem STATUS/SYSCALL; kernel lê (fd_app_r)
+//  - kernel->IC : kernel avisa início de I/O; IC lê (fd_ic_r)
 static int fd_app_r = -1, fd_app_w = -1; // app->kernel (kernel lê r; apps escrevem w)
 static int fd_ic_r  = -1, fd_ic_w  = -1; // kernel->IC   (IC lê r; kernel escreve w)
 static pid_t ic_pid = -1;
+
 
 /* flags de sinal */
 static volatile sig_atomic_t got_irq0 = 0; // timeslice
 static volatile sig_atomic_t got_irq1 = 0; // I/O terminado
 static volatile sig_atomic_t got_sysc = 0; // notificação para drenar pipe
 
-/* ====== Fila de prontos ====== */
+// ====== Fila de PRONTOS (Round-Robin FIFO) ======
 static pid_t rq[MAX_APPS];
 static int rq_head = 0, rq_tail = 0, rq_count = 0;
 
+// PID atualmente em execução (RUNNING), ou -1 se CPU ociosa
 static pid_t current = -1;
 
+// ====== Fila de BLOQUEADOS por I/O ======
+// io_q guarda a ordem de chegada; io_busy/io_serving indicam serviço ativo
 /* Fila de bloqueados por I/O e quem está em serviço */
 static pid_t io_q[MAX_APPS];
 static int io_head = 0, io_tail = 0, io_count = 0;
@@ -46,12 +65,13 @@ static pid_t io_serving = -1;
 /* Contagem de finalizados para critério de parada */
 static int finished_count = 0;
 
-/* Anti-stall (quando só há 1 pronto e ele “não anda”) */
+
 static int stall_ticks = 0;        // quantos IRQ0 seguidos sem progresso do current
 static int last_progress_pc = -1;  // último PC observado do current
 
 /* Tempo base para logs */
 static time_t t0;
+
 
 /* ==== PROTÓTIPOS (evita "implicit declaration" no Clang) ==== */
 static void rq_push(pid_t p);
@@ -63,10 +83,13 @@ static void handle_app_pipe(void);
 /* ====== Helpers ====== */
 static void log_ts_prefix(void)
 {
+    // Prefixa cada linha de log com segundos decorridos desde o boot (t0)
     time_t now = time(NULL);
     printf("[%3lds] ", (long)(now - t0));
     fflush(stdout);
 }
+
+// Resolve PID -> nome curto (A1..An) para logs
 static const char *name_of(pid_t pid)
 {
     for (int i = 0; i < nprocs; i++)
@@ -74,6 +97,8 @@ static const char *name_of(pid_t pid)
             return procs[i].name;
     return "?";
 }
+
+// Busca o PCB pelo PID; retorna NULL se não encontrado
 static pcb_t *bypid(pid_t pid)
 {
     for (int i = 0; i < nprocs; i++)
@@ -81,6 +106,8 @@ static pcb_t *bypid(pid_t pid)
             return &procs[i];
     return NULL;
 }
+
+// Coloca um FD em modo não-bloqueante (usado em fd_app_r)
 static void set_nonblock(int fd)
 {
     int fl = fcntl(fd, F_GETFL, 0);
@@ -88,11 +115,12 @@ static void set_nonblock(int fd)
 }
 
 /* === Helpers de vida e limpeza de filas === */
+// Checa se o processo ainda existe (kill(pid,0)==0)
 static int is_alive(pid_t pid) {
     return (kill(pid, 0) == 0);
 }
 
-/* fila de prontos */
+// Helpers de fila de PRONTOS (push/pop) — ignoram PIDs finalizados
 static void rq_push(pid_t p)
 {
     pcb_t *pp = bypid(p);
@@ -111,7 +139,7 @@ static int rq_pop(pid_t *p)
     return 1;
 }
 
-/* fila de I/O */
+// Helpers de fila de I/O (push/pop) — ordem de chegada (FIFO)
 static void io_push(pid_t p)
 {
     if (io_count >= MAX_APPS) return;
@@ -128,7 +156,7 @@ static int io_pop(pid_t *p)
     return 1;
 }
 
-/* limpeza de filas (usa protótipos acima) */
+// Remove um PID de dentro da fila (compactando) — usado ao FINISH
 static void rq_remove_pid(pid_t pid) {
     int n = rq_count;
     for (int i = 0; i < n; i++) {
@@ -158,6 +186,7 @@ static void on_sysc(int s){ (void)s; got_sysc = 1; }
 /* ====== Escalonamento ====== */
 static void dispatch_next()
 {
+    // Escolhe o próximo PRONTO e o coloca em RUNNING (SIGCONT). Se fila vazia, loga.
     if (current != -1) return;
 
     pid_t nx;
@@ -178,8 +207,9 @@ static void dispatch_next()
                p->last_pc,
                (p->last_syscall != -1) ? (p->last_syscall ? "W" : "R") : "-");
 
+        // Libera o processo (se estava parado). A partir daqui, ele pode enviar STATUS.
         kill(nx, SIGCONT);
-        // Dá um tempo pro app postar STATUS e já drenamos o pipe
+        // Pequena janela (~15ms) para o app postar STATUS no pipe; drenamos já para o log sair "colado" ao DISPATCH.
         for (int spin = 0; spin < 5; ++spin) {   // 5 iterações ~15 ms
             usleep(3000);                        // 3 ms por volta
             handle_app_pipe();                   // leitura não bloqueante
@@ -199,6 +229,7 @@ static void dispatch_next()
 
 static void preempt_current()
 {
+    // Preempção do processo atual (SIGSTOP) e retorno à fila de PRONTOS
     if (current == -1) return;
     if (is_alive(current)) kill(current, SIGSTOP);
     pcb_t *p = bypid(current);
@@ -215,6 +246,7 @@ static void preempt_current()
 /* Inicia serviço de I/O se o dispositivo está livre */
 static void start_io_if_idle()
 {
+    // Se D1 está livre, pega um bloqueado em I/O e inicia serviço (3s no IC)
     if (io_busy) return;
     pid_t p;
     if (!io_pop(&p)) return;
@@ -230,7 +262,9 @@ static void start_io_if_idle()
     printf(C_IO "IO-START  >> %-3s (pid=%d) — D1 ocupado" C_RST "\n", name_of(p), (int)p);
 }
 
-/* ====== Comunicação com apps ====== */
+// Drena mensagens enviadas pelos apps (STATUS e SYSCALL)
+//  - STATUS: atualiza last_pc
+//  - SYSCALL: marca BLOCKED, enfileira em I/O e (se idle) dispara IO-START
 static void handle_app_pipe()
 {
     for (;;) {
@@ -248,6 +282,7 @@ static void handle_app_pipe()
         if (!p) continue;
 
         if (m.msg_type == MSG_SYSCALL_RW) {
+            // App pediu I/O: salva o tipo (R/W) no PCB para logs/restauração
             /* salva no contexto o parâmetro da syscall (R/W) */
             p->last_syscall = (m.arg ? 1 : 0);
 
@@ -269,6 +304,7 @@ static void handle_app_pipe()
             start_io_if_idle();
         }
         else if (m.msg_type == MSG_APP_STATUS) {
+            // STATUS: último PC do app (usado no restore e para detectar stall)
             p->last_pc = m.arg;   // mantém PC atualizado no contexto
             if (current == p->pid) {
                 /* progresso do processo corrente: zera stall */
@@ -282,6 +318,7 @@ static void handle_app_pipe()
 }
 
 /* ====== Reaper ====== */
+// Reaper: trata término de filhos, marca FINISHED e remove de filas
 static void on_child_exit()
 {
     int status;
@@ -305,6 +342,7 @@ static void on_child_exit()
 }
 
 /* ====== Critério de parada ====== */
+// Critério de parada: todos finalizaram e não há nada em filas/serviço
 static int all_done(void)
 {
     return (finished_count == nprocs) && (rq_count == 0) && (current == -1)
@@ -312,11 +350,19 @@ static int all_done(void)
 }
 
 /* ====== Loop principal ====== */
+// Loop principal do kernel: reage a eventos e mantém a política de escalonamento
+// Ordem de reação:
+//   1) drena pipe de apps
+//   2) IRQ1 (fim de I/O) — desbloqueia e redispatch
+//   3) IRQ0 (timer) — preempta se houver disputa; único pronto continua
+//   4) SIGALRM (nudge) — se CPU ociosa, despacha
+//   5) coleta filhos terminados; checa critério de parada
 static void schedule_loop()
 {
     for (;;) {
         handle_app_pipe();
 
+        // Fim de I/O: libera o processo bloqueado e tenta reiniciar próximo serviço
         if (got_irq1) {
             got_irq1 = 0;
             log_ts_prefix();
@@ -337,6 +383,7 @@ static void schedule_loop()
             dispatch_next();
         }
 
+        // Tick do timer (IRQ0): decide entre manter atual ou preemptar, conforme disputa
         if (got_irq0) {
             got_irq0 = 0;
 
@@ -345,7 +392,7 @@ static void schedule_loop()
                 log_ts_prefix();
                 printf(C_IRQ "IRQ0      ** time-slice encerrado — único pronto continua" C_RST "\n");
 
-                /* 1) Reforço: se ficou parado em SIGSTOP por corrida, acorda */
+                /* 1) Reforço defensivo: se houve corrida e o processo ficou parado, acorda */
                 kill(current, SIGCONT);
 
                 /* 2) Watchdog: se não há progresso de PC, conta stall */
@@ -359,7 +406,7 @@ static void schedule_loop()
                     }
                 }
 
-                /* 3) Se 5 ticks sem progresso, “nudge”: STOP -> fila -> DISPATCH */
+                // Se ficar 5 ticks sem progresso, "cutuca": pausa e redespacha
                 if (stall_ticks >= 5 && cp) {
                     log_ts_prefix();
                     printf(C_ERR "NUDGE     !! sem progresso (%d ticks) — reativando %s" C_RST "\n",
@@ -402,12 +449,19 @@ static void schedule_loop()
 }
 
 /* ====== Main ====== */
+// Mensagem de uso para parâmetros inválidos
 static void usage(const char *argv0)
 {
     fprintf(stderr, "Uso: %s <num_apps (3..6)>\n", argv0);
     exit(1);
 }
 
+// ====== Ponto de entrada do kernel ======
+// - Cria pipes
+// - Forca o InterController (IC)
+// - Configura handlers
+// - Forca os apps A1..An e os coloca em PRONTOS
+// - Pausa todos e inicia o loop de escalonamento
 int main(int argc, char **argv)
 {
     t0 = time(NULL);
@@ -421,6 +475,7 @@ int main(int argc, char **argv)
         usage(argv[0]);
     }
 
+    // Cria pipes de IPC e coloca fd_app_r em não-bloqueante
     /* pipes app->kernel */
     int p_app[2];
     if (pipe(p_app) < 0) { perror("pipe app"); return 1; }
@@ -438,6 +493,7 @@ int main(int argc, char **argv)
     ic_pid = fork();
     if (ic_pid == 0)
     {
+        // O IC só precisa ler do pipe (fd_ic_r) e conhecer o PID do kernel
         close(fd_app_r);
         close(fd_app_w);
         close(fd_ic_w); /* IC só lê */
@@ -450,6 +506,8 @@ int main(int argc, char **argv)
     }
     close(fd_ic_r); // kernel não lê do IC
 
+    // Instala handlers: IRQ0 (SIGUSR1), IRQ1 (SIGUSR2) e "nudge" (SIGALRM)
+    // SIGCHLD chama on_child_exit para marcar FINISHED
     /* Handlers */
     struct sigaction sa = {0};
     sa.sa_handler = on_irq0;  sigaction(SIGUSR1, &sa, NULL); // IRQ0
@@ -457,6 +515,7 @@ int main(int argc, char **argv)
     sa.sa_handler = on_sysc;  sigaction(SIGALRM, &sa, NULL); // “acorda kernel”
     signal(SIGCHLD, (void (*)(int))on_child_exit);
 
+    // Cria e registra os apps A1..An (PCB + fila de PRONTOS)
     /* Fork apps A1..An */
     log_ts_prefix();
     printf(C_SCH "BOOT      ~~ KernelSim iniciando (%d apps)" C_RST "\n", nprocs);
@@ -498,14 +557,16 @@ int main(int argc, char **argv)
         // (sem sleep para reduzir janelas de corrida no boot)
     }
 
-    /* Pausa todos; kernel decide quem roda */
+    // Pausa todos os apps; a partir daqui o kernel decide a execução (DISPATCH)
     for (int i = 0; i < nprocs; i++)
         kill(procs[i].pid, SIGSTOP);
     current = -1;
 
+    // Dá o primeiro DISPATCH e entra no loop de escalonamento principal
     dispatch_next();
     schedule_loop();
 
+    // Encerramento ordenado: todos os apps e o IC concluídos
     log_ts_prefix();
     printf(C_SCH "SHUTDOWN  ~~ Kernel encerrado\n" C_RST);
     return 0;
