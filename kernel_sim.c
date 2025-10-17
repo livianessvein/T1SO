@@ -53,7 +53,7 @@ static int last_progress_pc = -1;  // último PC observado do current
 /* Tempo base para logs */
 static time_t t0;
 
-/* ==== PROTÓTIPOS (evita "implicit declaration" no Clang) ==== */
+/* ==== PROTÓTIPOS ==== */
 static void rq_push(pid_t p);
 static int  rq_pop(pid_t *p);
 static void io_push(pid_t p);
@@ -85,8 +85,6 @@ static void set_nonblock(int fd)
     int fl = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
-
-/* === Helpers de vida e limpeza de filas === */
 static int is_alive(pid_t pid) {
     return (kill(pid, 0) == 0);
 }
@@ -127,7 +125,7 @@ static int io_pop(pid_t *p)
     return 1;
 }
 
-/* limpeza de filas (usa protótipos acima) */
+/* limpeza de filas */
 static void rq_remove_pid(pid_t pid) {
     int n = rq_count;
     for (int i = 0; i < n; i++) {
@@ -201,7 +199,7 @@ static void preempt_current()
         rq_push(current);
     }
     current = -1;
-    stall_ticks = 0; // vai recomeçar em outro processo
+    stall_ticks = 0;
     log_ts_prefix();
     printf(C_SCH "PREEMPT   <- %-3s (volta à fila de prontos)" C_RST "\n", p ? p->name : "?");
 }
@@ -480,6 +478,10 @@ int main(int argc, char **argv)
             procs[i].last_syscall = -1;   /* parâmetro de syscall salvo no contexto */
             rq_push(pid);
 
+            /* 🔒 Congela imediatamente cada filho recém-criado
+               para não haver “PC ::” antes do primeiro DISPATCH */
+            kill(pid, SIGSTOP);
+
             log_ts_prefix();
             printf(C_APP "SPAWN     ++ %-3s (pid=%d) adicionado à fila de prontos" C_RST "\n",
                    procs[i].name, (int)pid);
@@ -489,16 +491,12 @@ int main(int argc, char **argv)
             perror("fork app");
             return 1;
         }
-        // (sem sleep para reduzir janelas de corrida no boot)
+        // sem sleep (boot rápido e determinístico)
     }
 
-    /* Pausa todos; kernel decide quem roda */
-    for (int i = 0; i < nprocs; i++)
-        kill(procs[i].pid, SIGSTOP);
-    current = -1;
-
-    dispatch_next();
-    schedule_loop();
+    current = -1;           // fila pronta; ninguém rodando ainda
+    dispatch_next();        // escolhe o primeiro
+    schedule_loop();        // loop principal
 
     log_ts_prefix();
     printf(C_SCH "SHUTDOWN  ~~ Kernel encerrado\n" C_RST);
