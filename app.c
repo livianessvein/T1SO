@@ -1,3 +1,6 @@
+// Livian Essvein 2211667
+// Giovana Nogueira 2220372    
+   
 #include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
