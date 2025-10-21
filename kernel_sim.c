@@ -56,6 +56,9 @@ static pid_t io_serving = -1;
 /* Contagem de finalizados para critério de parada */
 static int finished_count = 0;
 
+/* Offset para nome/índice dos apps (permite começar em A4..A6 etc.) */
+static int name_offset = 0;
+
 /* Anti-stall (quando só há 1 pronto e ele “não anda”) */
 static int stall_ticks = 0;        // quantos IRQ0 seguidos sem progresso do current
 static int last_progress_pc = -1;  // último PC observado do current
@@ -438,6 +441,7 @@ static void schedule_loop()
 static void usage(const char *argv0)
 {
     fprintf(stderr, "Uso: %s <num_apps (3..6)>\n", argv0);
+    fprintf(stderr, "Opcional: defina APP_NAME_OFFSET para deslocar a numeração dos apps (ex.: APP_NAME_OFFSET=3 gera A4..)\n");
     exit(1);
 }
 
@@ -458,6 +462,20 @@ int main(int argc, char **argv)
     if (nprocs < 3 || nprocs > 6) {
         fprintf(stderr, C_ERR "Erro: número de apps precisa estar entre 3 e 6 (conforme enunciado)." C_RST "\n");
         usage(argv[0]);
+    }
+
+    /* Offset opcional para nome/índice dos apps, via variável de ambiente */
+    const char *noff = getenv("APP_NAME_OFFSET");
+    if (noff && *noff) {
+        name_offset = atoi(noff);
+        if (name_offset < 0) name_offset = 0;
+    }
+
+    /* Offset opcional para nome/índice dos apps, via variável de ambiente */
+    const char *noff = getenv("APP_NAME_OFFSET");
+    if (noff && *noff) {
+        name_offset = atoi(noff);
+        if (name_offset < 0) name_offset = 0;
     }
 
     // Cria pipes de IPC e coloca fd_app_r em não-bloqueante
@@ -513,8 +531,9 @@ int main(int argc, char **argv)
             close(fd_ic_w);
             char fdw[32], name[32], idx[8], kpid[32];
             snprintf(fdw, sizeof(fdw), "%d", fd_app_w);
-            snprintf(idx, sizeof(idx), "%d", i + 1);
-            snprintf(name, sizeof(name), "A%d", i + 1);
+            int computed_idx = (i + 1) + name_offset;
+            snprintf(idx, sizeof(idx), "%d", computed_idx);
+            snprintf(name, sizeof(name), "A%d", computed_idx);
             snprintf(kpid, sizeof(kpid), "%d", getppid());
             execl("./app", "./app", fdw, name, idx, kpid, (char *)NULL);
             perror("exec app");
@@ -522,7 +541,8 @@ int main(int argc, char **argv)
         }
         else if (pid > 0)
         {
-            snprintf(procs[i].name, sizeof(procs[i].name), "A%d", i + 1);
+            int computed_idx = (i + 1) + name_offset;
+            snprintf(procs[i].name, sizeof(procs[i].name), "A%d", computed_idx);
             procs[i].pid = pid;
             procs[i].st = ST_READY;
             procs[i].last_pc = 0;
