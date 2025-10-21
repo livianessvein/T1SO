@@ -1,3 +1,6 @@
+// Livian Essvein 2211667
+// Giovana Nogueira 2220372    
+   
 #ifndef COMMON_H
 #define COMMON_H
 
