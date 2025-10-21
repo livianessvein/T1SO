@@ -16,7 +16,6 @@ inter_controller: inter_controller.c common.h
 app: app.c common.h
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# Alias para manter o comando ./kernel que você já usa
 kernel: kernel_sim
 	cp -f kernel_sim kernel
 

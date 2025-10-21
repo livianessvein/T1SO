@@ -55,15 +55,6 @@ int main(int argc, char** argv){
         else if(strcmp(env_profile, "split")==0) profile_mode = PROFILE_SPLIT;
     }
 
-    // Perfil de teste: "cpu" (sem I/O), "io" (todos com I/O) ou "split" (A1..A3 sem I/O; A4..A6 com I/O)
-    enum { PROFILE_SPLIT, PROFILE_CPU, PROFILE_IO } profile_mode = PROFILE_SPLIT;
-    const char *env_profile = getenv("APP_PROFILE");
-    if(env_profile){
-        if(strcmp(env_profile, "cpu")==0) profile_mode = PROFILE_CPU;
-        else if(strcmp(env_profile, "io")==0) profile_mode = PROFILE_IO;
-        else if(strcmp(env_profile, "split")==0) profile_mode = PROFILE_SPLIT;
-    }
-
     // Define pontos específicos de I/O de acordo com o índice do processo
     int io_points[5]={0};
     int io_n=0;

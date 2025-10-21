@@ -471,13 +471,6 @@ int main(int argc, char **argv)
         if (name_offset < 0) name_offset = 0;
     }
 
-    /* Offset opcional para nome/índice dos apps, via variável de ambiente */
-    const char *noff = getenv("APP_NAME_OFFSET");
-    if (noff && *noff) {
-        name_offset = atoi(noff);
-        if (name_offset < 0) name_offset = 0;
-    }
-
     // Cria pipes de IPC e coloca fd_app_r em não-bloqueante
     /* pipes app->kernel */
     int p_app[2];
