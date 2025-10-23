@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <stdint.h>
 
-// ===== Cores p/ logs (opcionais) =====
+// ===== Cores p/ logs =====
 #define C_RST "\x1b[0m"
 #define C_IRQ "\x1b[36m"
 #define C_SCH "\x1b[33m"
@@ -12,7 +12,7 @@
 #define C_APP "\x1b[32m"
 #define C_ERR "\x1b[31m"
 
-// ===== Config geral =====
+
 #define PC_MAX      15
 #define QUANTUM     1   // 1 tick (dormimos 1s por tick)
 #define IO_LAT      3   // latência do dispositivo em ticks
@@ -123,7 +123,7 @@ static void log_all_done() {
     ts(); printf("SHUTDOWN  " C_SCH "~~" C_RST " Kernel encerrado\n");
 }
 
-// ===== Perfil das apps =====
+
 //  - APP_PROFILE=cpu   -> todos CPU-only (A1..An sem I/O)
 //  - APP_PROFILE=io    -> todos usam I/O
 //  - default (split)   -> A1..A3 CPU-only; A4..A6 usam I/O
