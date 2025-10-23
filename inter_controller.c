@@ -50,7 +50,7 @@ int main(int argc, char** argv){
             sleep(3);
             kill(kpid, SIGUSR2); // IRQ1
         }else{
-            usleep(10000);
+            sleep(10000);
         }
     }
     return 0;
